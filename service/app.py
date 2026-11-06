@@ -19,9 +19,27 @@ CONFIG_PATH = BASE_DIR / "config.json"
 
 BACKUP_DIRECTORY_NAME = "zikuu-mini"
 
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def backup_lifespan(app: FastAPI):
+    history = BackupHistory()
+
+    recovered = await history.recover_interrupted()
+
+    if recovered:
+        print(
+            f"Recovered {recovered} interrupted backup runs."
+        )
+
+    yield
+
+
 app = FastAPI(
     title="ZIKUU Mini Backup Service",
     version="0.1.0",
+    lifespan=backup_lifespan,
 )
 
 
@@ -404,6 +422,75 @@ async def _execute_backup() -> None:
                 )
             )
 
+async def _execute_backup_with_history(
+    run_id: str,
+) -> None:
+    """
+    Run the existing backup operation and persist its result.
+
+    History failures must not change the execution result.
+    """
+    try:
+        await _execute_backup()
+    finally:
+        async with _state_lock:
+            execution = _execution_state.model_copy(
+                deep=True
+            )
+
+        report: dict[str, Any] | None = None
+
+        if execution.state == "completed":
+            try:
+                report = await _load_backup_report(
+                    "current"
+                )
+            except Exception as exc:
+                print(
+                    "Failed to load backup history report:",
+                    exc,
+                )
+
+        overall_status = (
+            report.get("status", "unknown")
+            if report is not None
+            else (
+                "failed"
+                if execution.state == "failed"
+                else "unknown"
+            )
+        )
+
+        try:
+            await _backup_history.finish(
+                run_id,
+                execution_state=execution.state,
+                exit_code=execution.exit_code,
+                status=overall_status,
+                targets=(
+                    report.get("targets", [])
+                    if report is not None
+                    else []
+                ),
+                completed_at=execution.completed_at,
+                report_started_at=(
+                    report.get("started_at")
+                    if report is not None
+                    else None
+                ),
+                report_completed_at=(
+                    report.get("completed_at")
+                    if report is not None
+                    else None
+                ),
+                error=execution.stderr,
+            )
+        except Exception as exc:
+            print(
+                "Failed to persist backup history:",
+                exc,
+            )
+
 
 @app.get("/health")
 async def health() -> dict[str, str]:
@@ -448,22 +535,31 @@ async def start_backup() -> BackupStartResponse:
         ):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=(
-                    "Backup is already running."
-                ),
+                detail="Backup is already running.",
             )
 
         started_at = _now_iso()
 
-        _execution_state = (
-            BackupExecutionState(
-                state="running",
-                started_at=started_at,
+        try:
+            run_id = await _backup_history.start(
+                started_at
             )
+        except OSError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    "Failed to persist backup start: "
+                    f"{exc}"
+                ),
+            ) from exc
+
+        _execution_state = BackupExecutionState(
+            state="running",
+            started_at=started_at,
         )
 
         _backup_task = asyncio.create_task(
-            _execute_backup(),
+            _execute_backup_with_history(run_id)
         )
 
     return BackupStartResponse(
