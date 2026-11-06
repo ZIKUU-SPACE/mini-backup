@@ -1,0 +1,44 @@
+# /srv/mini-backup/backup-postgresql
+
+#!/usr/bin/env bash
+
+set -euo pipefail
+umask 077
+
+CONTAINER_NAME="postgresql"
+POSTGRES_USER="postgres"
+
+if [[ $# -lt 2 ]]; then
+    echo "Usage: $0 <backup-directory> <database> [database ...]" >&2
+    exit 2
+fi
+
+BACKUP_ROOT="$1"
+shift
+
+DATABASES=("$@")
+OUTPUT_DIR="${BACKUP_ROOT}/postgresql"
+
+mkdir -p "${OUTPUT_DIR}"
+
+echo "Backing up PostgreSQL globals..."
+
+docker exec "${CONTAINER_NAME}" \
+    pg_dumpall \
+    -U "${POSTGRES_USER}" \
+    --globals-only \
+    > "${OUTPUT_DIR}/globals.sql"
+
+for database in "${DATABASES[@]}"; do
+    echo "Backing up PostgreSQL database: ${database}"
+
+    docker exec "${CONTAINER_NAME}" \
+        pg_dump \
+        -U "${POSTGRES_USER}" \
+        -Fc \
+        "${database}" \
+        > "${OUTPUT_DIR}/${database}.dump"
+done
+
+echo "PostgreSQL backup completed:"
+echo "${OUTPUT_DIR}"

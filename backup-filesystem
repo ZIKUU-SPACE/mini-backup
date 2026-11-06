@@ -1,0 +1,35 @@
+# /srv/mini-backup/backup-filesystem
+
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if [[ $# -ne 2 ]]; then
+    echo "Usage: $0 <source-directory> <backup-directory>" >&2
+    exit 2
+fi
+
+SOURCE="$1"
+BACKUP_ROOT="$2"
+
+if [[ ! -d "${SOURCE}" ]]; then
+    echo "Source directory does not exist: ${SOURCE}" >&2
+    exit 1
+fi
+
+NAME="$(basename "${SOURCE}")"
+OUTPUT_DIR="${BACKUP_ROOT}/filesystem/${NAME}"
+
+mkdir -p "${OUTPUT_DIR}"
+
+echo "Backing up filesystem target: ${SOURCE}"
+echo "Destination: ${OUTPUT_DIR}"
+
+rsync \
+    -aHAX \
+    --numeric-ids \
+    "${SOURCE}/" \
+    "${OUTPUT_DIR}/"
+
+echo "Filesystem backup completed:"
+echo "${OUTPUT_DIR}"

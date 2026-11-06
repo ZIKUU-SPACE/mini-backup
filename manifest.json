@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "targets": [
+    {
+      "name": "postgresql",
+      "handler": "postgresql",
+      "databases": [
+        "gitea",
+        "nextcloud",
+        "postgres",
+        "wikijs"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "qdrant",
+      "handler": "qdrant",
+      "enabled": true
+    },
+    {
+      "name": "minio",
+      "handler": "minio",
+      "enabled": true
+    },
+    {
+      "name": "gitea",
+      "handler": "filesystem",
+      "source": "/srv/storage-data/gitea",
+      "enabled": true
+    },
+    {
+      "name": "nextcloud",
+      "handler": "filesystem",
+      "source": "/srv/storage-data/nextcloud",
+      "enabled": true
+    }
+  ]
+}

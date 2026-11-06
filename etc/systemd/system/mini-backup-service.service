@@ -1,0 +1,24 @@
+# /etc/systemd/system/mini-backup-service.service
+
+[Unit]
+Description=ZIKUU Mini Backup Service
+After=local-fs.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/srv/mini-backup/service
+
+RuntimeDirectory=mini-backup
+RuntimeDirectoryMode=0755
+
+ExecStart=/srv/mini-backup/service/.venv/bin/uvicorn \
+    app:app \
+    --uds /run/mini-backup/mini-backup.sock
+
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

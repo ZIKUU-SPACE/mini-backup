@@ -1,0 +1,223 @@
+# /srv/mini-backup/backup
+
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+BASE_DIR="/srv/mini-backup"
+MANIFEST="${BASE_DIR}/manifest.json"
+CONFIG="${BASE_DIR}/config.json"
+
+if [[ "${EUID}" -ne 0 ]]; then
+    echo "This backup must be run as root." >&2
+    exit 1
+fi
+
+if [[ ! -f "${MANIFEST}" ]]; then
+    echo "Manifest not found: ${MANIFEST}" >&2
+    exit 1
+fi
+
+if [[ ! -f "${CONFIG}" ]]; then
+    echo "Config not found: ${CONFIG}" >&2
+    exit 1
+fi
+
+BACKUP_LABEL="$(jq -r '.backup_device.label' "${CONFIG}")"
+BACKUP_UUID="$(jq -r '.backup_device.uuid' "${CONFIG}")"
+
+DEVICE="$(blkid -U "${BACKUP_UUID}" || true)"
+
+if [[ -z "${DEVICE}" ]]; then
+    echo "Backup device not found for UUID: ${BACKUP_UUID}" >&2
+    exit 1
+fi
+
+ACTUAL_LABEL="$(blkid -s LABEL -o value "${DEVICE}")"
+
+if [[ "${ACTUAL_LABEL}" != "${BACKUP_LABEL}" ]]; then
+    echo "Backup device label mismatch." >&2
+    echo "Expected: ${BACKUP_LABEL}" >&2
+    echo "Actual:   ${ACTUAL_LABEL}" >&2
+    exit 1
+fi
+
+MOUNT_POINT="$(findmnt -nr -S "${DEVICE}" -o TARGET || true)"
+
+if [[ -z "${MOUNT_POINT}" ]]; then
+    echo "Backup device is not mounted: ${DEVICE}" >&2
+    exit 1
+fi
+
+STARTED_AT="$(date --iso-8601=seconds)"
+
+BACKUP_BASE="${MOUNT_POINT}/zikuu-mini"
+CURRENT="${BACKUP_BASE}/current"
+PREVIOUS="${BACKUP_BASE}/previous"
+STAGING="${BACKUP_BASE}/staging"
+
+BACKUP_ROOT="${STAGING}"
+REPORT="${BACKUP_ROOT}/backup-report.json"
+
+mkdir -p "${BACKUP_BASE}"
+
+if [[ -e "${STAGING}" ]]; then
+    echo "Removing old staging backup:"
+    echo "${STAGING}"
+    rm -rf "${STAGING}"
+fi
+
+mkdir -p "${STAGING}"
+
+echo "Backup device: ${DEVICE}"
+echo "Mount point:   ${MOUNT_POINT}"
+echo "Backup root:   ${BACKUP_ROOT}"
+
+TARGET_RESULTS='[]'
+
+target_count="$(jq '.targets | length' "${MANIFEST}")"
+
+for ((i = 0; i < target_count; i++)); do
+    enabled="$(jq -r ".targets[$i].enabled" "${MANIFEST}")"
+
+    if [[ "${enabled}" != "true" ]]; then
+        continue
+    fi
+
+    name="$(jq -r ".targets[$i].name" "${MANIFEST}")"
+    handler="$(jq -r ".targets[$i].handler" "${MANIFEST}")"
+    status="success"
+    reason=""
+
+    echo
+    echo "==> ${name} (${handler})"
+
+    case "${handler}" in
+        postgresql)
+            mapfile -t databases < <(
+                jq -r ".targets[$i].databases[]" "${MANIFEST}"
+            )
+
+            if "${BASE_DIR}/backup-postgresql" \
+                "${BACKUP_ROOT}" \
+                "${databases[@]}"
+            then
+                status="success"
+            else
+                status="failed"
+                reason="handler_failed"
+            fi
+            ;;
+
+        filesystem)
+            source_path="$(jq -r ".targets[$i].source" "${MANIFEST}")"
+
+            if "${BASE_DIR}/backup-filesystem" \
+                "${source_path}" \
+                "${BACKUP_ROOT}"
+            then
+                status="success"
+            else
+                status="failed"
+                reason="handler_failed"
+            fi
+            ;;
+
+        qdrant)
+            echo "Skipped: qdrant handler is not implemented yet."
+            status="skipped"
+            reason="handler_not_implemented"
+            ;;
+
+        minio)
+            echo "Skipped: minio handler is not implemented yet."
+            status="skipped"
+            reason="handler_not_implemented"
+            ;;
+
+        *)
+            echo "Unknown handler: ${handler}" >&2
+            status="failed"
+            reason="unknown_handler"
+            ;;
+    esac
+
+    TARGET_RESULTS="$(
+        jq \
+            --arg name "${name}" \
+            --arg handler "${handler}" \
+            --arg status "${status}" \
+            --arg reason "${reason}" \
+            '. + [{
+                name: $name,
+                handler: $handler,
+                status: $status
+            }
+            + if $reason != "" then {reason: $reason} else {} end]' \
+            <<< "${TARGET_RESULTS}"
+    )"
+done
+
+if jq -e 'any(.[]; .status == "failed")' \
+    <<< "${TARGET_RESULTS}" >/dev/null
+then
+    OVERALL_STATUS="failed"
+elif jq -e 'any(.[]; .status == "skipped")' \
+    <<< "${TARGET_RESULTS}" >/dev/null
+then
+    OVERALL_STATUS="partial"
+else
+    OVERALL_STATUS="success"
+fi
+
+COMPLETED_AT="$(date --iso-8601=seconds)"
+
+jq -n \
+    --arg started_at "${STARTED_AT}" \
+    --arg completed_at "${COMPLETED_AT}" \
+    --arg status "${OVERALL_STATUS}" \
+    --argjson targets "${TARGET_RESULTS}" \
+    '{
+        version: 1,
+        started_at: $started_at,
+        completed_at: $completed_at,
+        status: $status,
+        targets: $targets
+    }' \
+    > "${REPORT}"
+
+if [[ "${OVERALL_STATUS}" == "failed" ]]; then
+    echo
+    echo "Backup failed."
+    echo "Current backup was not changed."
+    echo "Failed backup remains in staging:"
+    echo "${STAGING}"
+    echo "Report:"
+    echo "${REPORT}"
+    exit 1
+fi
+
+echo
+echo "Promoting staging backup..."
+
+if [[ -e "${PREVIOUS}" ]]; then
+    rm -rf "${PREVIOUS}"
+fi
+
+if [[ -e "${CURRENT}" ]]; then
+    mv "${CURRENT}" "${PREVIOUS}"
+fi
+
+mv "${STAGING}" "${CURRENT}"
+
+echo
+echo "Backup completed."
+echo "Status:   ${OVERALL_STATUS}"
+echo "Current:  ${CURRENT}"
+
+if [[ -e "${PREVIOUS}" ]]; then
+    echo "Previous: ${PREVIOUS}"
+fi
+
+echo "Report:"
+echo "${CURRENT}/backup-report.json"
